@@ -3,17 +3,19 @@ from PVector import *
 from math import *
 from random import *
 from tkinter import *
+from sklearn.cluster import KMeans
+import numpy as np
 
 class Vehicle:
     # Initialize the vehicle. max speed is the maximum speed the vehicle can move. Provide mass, color, size and
-    # initial location:
+    # initial location
     def __init__(self, canvas, width, height, max_speed, mass, image):
         self.canvas = canvas
         # the parameters of the environment: dimensions of the top window:
         self.width = width
         self.height = height
         # define the initial position, velocity and acceleration of the vehicle:
-        self.position = PVector(self.width/2, self.height/2)
+        self.position = PVector(randrange(0, self.width), randrange(0, self.height))  # random starting position
         self.velocity = PVector(0, 0)
         self.acceleration = PVector(0, 0)
         self.max_speed = max_speed
@@ -37,10 +39,8 @@ class Vehicle:
         self.canvas.move(self.id, self.velocity.x, self.velocity.y)
         self.canvas.after(10, self.draw)  # redraw after 10 milliseconds
 
-        # start wandering in the world:
-        self.wandering()
-
         # check if vehicle hits a window edge:
+        #self.boundaries()
         self.boundaries()
         self.bounce()
 
@@ -56,29 +56,24 @@ class Vehicle:
     # methods to avoid the window boundaries: boundaries() and bounce()
     def boundaries(self):
         DISTANCE_FROM_BORDER = 100  # the distance from the borders where it starts to change direction
+        point = PVector(0, 0)
 
-        desired = PVector(0, 0)  # initialize the desired velocity vector
-
-        if self.velocity.x < 0 and self.position.x < DISTANCE_FROM_BORDER:  # approaching and close to left wall
-            desired.x = self.max_speed; desired.y = self.velocity.y
+        if self.position.x < DISTANCE_FROM_BORDER:  # close to left wall
+            point = PVector(0, self.position.y)
 
         elif self.position.x > self.width - DISTANCE_FROM_BORDER:  # close to right wall
-            desired.x = -self.max_speed; desired.y = self.velocity.y
+            point = PVector(self.width, self.position.y)
 
-        if self.position.y < DISTANCE_FROM_BORDER:  # close to ceiling
-            desired.x = self.velocity.x; desired.y = self.max_speed
+        elif self.position.y < DISTANCE_FROM_BORDER:  # close to ceiling
+            point = PVector(self.position.x, 0)
 
         elif self.position.y > self.height - DISTANCE_FROM_BORDER:  # close to floor
-            desired.x = self.velocity.x; desired.y = -self.max_speed
+            point = PVector(self.position.x, self.height)
 
-        #  calculate the steering vector based on the desired:
-        if desired.get_Magnitude() != 0:
-            desired.Normalize()
-            desired.Mult(self.max_speed)
-            steer = desired.Sub(self.velocity)
-            max_force = 10.0 / self.mass
-            steer.Limit(max_force)
-            self.apply_force(steer)
+        else:
+            point = PVector(self.width, self.height/2)
+
+        self.avoid_point(point, DISTANCE_FROM_BORDER)
 
     # ------------------------------------------------------------------
     # a simple bounce off the edges method (velocity reversal)
@@ -117,11 +112,32 @@ class Vehicle:
         self.apply_force(steer)
 
     # ------------------------------------------------------------------
+    # avoid a PVector point
+    def avoid_point(self, point, safe_distance):
+        # safe_distance represents how close to the point before activating fleeing
+        distance = self.position.distance(point)  # calculate the distance between vehicle and the point
+
+        if distance < safe_distance:  # point is getting too close
+            # create a vector to point away from the point:
+            diff = self.position.Sub(point)
+            diff.Normalize()
+            diff.Mult(self.max_speed)
+
+            # Subtract the desired from the current vectors to create the steering force vector:
+            steer = diff.Sub(self.velocity)
+
+            # Limit the steering force depending on the vehicle mass:
+            max_force = 10 / self.mass  # maximum force is inversely proportional to the vehicle mass
+            steer.Limit(max_force)
+            # Finally apply the steering force:
+            self.apply_force(steer)
+
+    # ------------------------------------------------------------------
     # method to create a wandering path for the vehicle. Result is to calculate a target vector
-    def wandering(self):
-        wanderR = 100  # Radius for our "wander circle"
+    def wandering(self, radius, distance):
+        wanderR = radius  # Radius for our "wander circle"
         wander_theta = 0  # angle of circle
-        wanderD = 200  # Distance from current location to the center of the "wander circle"
+        wanderD = distance  # Distance from current location to the center of the "wander circle"
         change = pi  # we randomly chose an angle from -π to π
         wander_theta = random() * 2.0 * change - change   # Randomly change wander theta from -change to change
 
@@ -138,32 +154,65 @@ class Vehicle:
         self.seek(circleloc)
 
     # ------------------------------------------------------------------
-    # when wasp comes closer than 200 pixels, creates an avoiding force to get away from it
-    def avoid_wasp(self, wasp):
-        SAFE_DISTANCE = 200  # how close to the wasp before activating fleeing
-        distance = self.position.distance(wasp.position)  # calculate the distance between him and the wasp
-        if distance < SAFE_DISTANCE:
-            # create a vector to point away from the wasp:
-            diff = PVector(0, 0)
-            diff = self.position.Sub(wasp.position)
-            diff.Normalize()
-            diff.Mult(self.max_speed)
-
-            # Subtract the desired from the current vectors to create the steering force vector:
-            steer = diff.Sub(self.velocity)
-
-            # finally limit the steering force depending on the vehicle mass:
-            max_force = 10.0 / self.mass  # maximum force is inversely proportional to the vehicle mass
-            steer.Limit(max_force)
-            # and now apply the steering force:
-            self.apply_force(steer)
+    def separate(self, butterflies):
+        SAFE_DISTANCE = 70  # minimum distance before activating fleeing
+        for butterfly in butterflies:
+            # calculate the distance between this vehicle and all other vehicles:
+            dist = self.position.distance(butterfly.position)
+            if dist > 0 and dist < SAFE_DISTANCE:
+                self.avoid_point(butterfly.position, SAFE_DISTANCE)  # avoid this vehicle
 
     # ------------------------------------------------------------------
-    def separate(self, batterflies):
-        desired_separation = 50  # how close to the other vehicles before activating fleeing
-        for i in batterflies:
-            # calculate the distance between this vehicle and all other vehicles:
-            dist = self.position.distance(batterflies[i].position)
-            if dist > 0 and dist < desired_separation:
-                # execute code to deal with fleeing from that vehicle
-                pass
+    def chase_butterflies(self, butterflies):
+        distance = []  # create a list of distances from wasp to all butterflies
+        for butterfly in butterflies:
+            dist = self.position.distance(butterfly.position)
+            distance.append(dist)
+
+        # find the nearest butterfly: sort the distance list. sorted gives a new sorted list, enumerate gives
+        # a tuple with first item the index and second the value, we sort by the value, and create a new list
+        # with the first, ie the index. Then we chose the first item, so the minimum.
+        if len(distance) > 0:  # seeks butterflies while they exist:
+            min_index = [i[0] for i in sorted(enumerate(distance), key=lambda x: x[1])][0]
+            self.seek(butterflies[min_index].position)
+
+    # ------------------------------------------------------------------
+    # each butterfly tries to classify wasp behaviour based on ts speed and if it killed another. If wasp is
+    # classified as enemy, butterfly runs faster
+    def recognize_enemy(self, butterflies, wasp):
+    # if length of butterflies is getting smaller, this indicates that wasp is enemy. An unsupervised learning
+    # algorithm (k-means) with inputs speed and length of butterlfy list, should classify the output as enemy or friend.
+    # if butterfly detects that wasp is enemy, it must raise a flag to increase the speed
+        pass
+
+    # ------------------------------------------------------------------
+    # I want to detect mouse movements and classify them as friendly or violent. A k-means algorithm was used but
+    # was very slow because I needed to run the model at each data frame.
+    # I need to get and store mouse movements and speed for a specific period of time, and classify it, and do that
+    # repeatedly. Its easier with a perceptron model of two inputs and one output to raise the flag of attack.
+
+    def mouse_attack(self, data_frame):
+        global is_aggressor  # aggression flag
+        AGGRESSIVE_THRESHOLD = 600
+
+        # Declaring k-means unsupervised Model with one cluster
+        #model = KMeans(n_clusters=1)
+        # Fitting Model
+        #model.fit(data_frame)
+        #level = sqrt(model.cluster_centers_[0][0] ** 2 + model.cluster_centers_[0][1] **2)
+
+        # simpler way: if the average of all magnitudes of samples within the dataframe is larger than 500,
+        # the behaviour is classified as aggressive and flag is raised
+        sum_list = []
+        for i in range(data_frame.shape[0]):  # for each sample in the data frame (row in the np array):
+            sum_list.append(sqrt(data_frame[i, 0] ** 2 + data_frame[i, 1] ** 2)) # magnitude of the two elements
+
+        average = sum(sum_list)/len(sum_list)
+        sum_list.clear()
+
+        if average > AGGRESSIVE_THRESHOLD:  # aggressive behaviour
+            is_aggressor = True
+        else:
+            is_aggressor = False
+
+        return is_aggressor
